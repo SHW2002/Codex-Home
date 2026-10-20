@@ -8,6 +8,6 @@ The built-in .system directory is managed by Codex and remains ignored.
 
 - [grill-me](grill-me/SKILL.md): sharpen a plan through detailed questions.
 - [grilling](grilling/SKILL.md): stress-test a plan before implementation.
-- [wecom-transfer](wecom-transfer/SKILL.md): prepare an existing chat's WeCom continuation entry.
+- [wecom-transfer](wecom-transfer/SKILL.md): bind an existing chat for direct WeCom continuation without routine elevation.
 
 Keep credentials and machine runtime data outside these directories.

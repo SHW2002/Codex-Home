@@ -2,3 +2,6 @@
 
 *.md text eol=lf
 *.toml text eol=lf
+
+# Preserve unified diff context, including blank context lines.
+*.patch text eol=lf -whitespace

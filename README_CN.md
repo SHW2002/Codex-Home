@@ -8,18 +8,18 @@
 
 - [AGENTS.md](AGENTS.md) 中的全局指令。
 - [skills/](skills/README_CN.md) 下自定义技能的指令、脚本、参考文档及界面元数据。
-- [wecom-transfer](skills/wecom-transfer/SKILL.md)：为当前已有桌面聊天生成企业微信接续入口。
+- [wecom-transfer](skills/wecom-transfer/SKILL.md)：将当前已有桌面聊天直接绑定到企业微信。
 
 ## 企微快捷入口
 
 在希望接续的 Codex 会话中输入：
 
-    $wecom-transfer 把当前会话转到企业微信，并复制入口文字。
+    $wecom-transfer 把当前会话转到企业微信。
 
-随后到已配对机器人单聊粘贴发送。辅助脚本检查已有聊天和服务状态，不会自行发送消息。
+技能通过本机 HTTP 接口直接绑定原聊天，并向已授权单聊发送切换通知。之后在企微直接发送文字或语音即可，无需聊天名称前缀。/desktop status 查看目标，/desktop off 解除；普通使用无需提权或读取凭证。
 详见[无密钥操作说明](skills/wecom-transfer/references/operations.md)。
 
-当前辅助脚本对应本机 Windows 部署 D:/Services/WeCom-Codex-Bridge；其他设备使用前应核对路径并自行配置已授权机器人。
+当前技能对应本机 Windows 部署 D:/Services/WeCom-Codex-Bridge；其他设备使用前应核对路径并自行配置已授权机器人。
 
 ## 本地保留
 

@@ -7,6 +7,6 @@
 
 - [grill-me](grill-me/SKILL.md)：通过深入提问完善计划。
 - [grilling](grilling/SKILL.md)：在实施前检验计划。
-- [wecom-transfer](wecom-transfer/SKILL.md)：生成已有聊天的企微接续入口。
+- [wecom-transfer](wecom-transfer/SKILL.md)：直接绑定已有聊天，后续企微消息自动接续，普通使用无需提权。
 
 凭证和本机运行数据不应放在技能目录中。

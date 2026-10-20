@@ -8,18 +8,18 @@ Reusable Codex instructions and custom skills synchronized across personal devic
 
 - Global instructions in [AGENTS.md](AGENTS.md).
 - Custom skills and their scripts, references, and interface metadata under [skills/](skills/README.md).
-- The [wecom-transfer skill](skills/wecom-transfer/SKILL.md), which prepares an existing desktop chat for continuation through the locally deployed WeCom bot.
+- The [wecom-transfer skill](skills/wecom-transfer/SKILL.md), which directly binds an existing desktop chat to the locally deployed WeCom bot.
 
 ## WeCom shortcut
 
 In the Codex conversation you want to continue, invoke:
 
-    $wecom-transfer Prepare this chat for WeCom and copy its entry message.
+    $wecom-transfer Continue this chat through WeCom.
 
-Paste the generated message into the paired bot's private chat. The helper checks the existing chat and service; it does not send messages by itself.
+The skill binds the existing chat through a loopback HTTP endpoint and sends a switch notification to your authorized private chat. Then send plain text or voice messages in WeCom without a title prefix. Use /desktop status to inspect the target or /desktop off to disconnect. Ordinary skill use needs no elevation or credentials.
 See the [credential-free operations guide](skills/wecom-transfer/references/operations.md).
 
-The current helper targets the existing Windows deployment in D:/Services/WeCom-Codex-Bridge.
+The skill targets the existing Windows deployment in D:/Services/WeCom-Codex-Bridge.
 On another device, review the local paths and prepare its own authorized bot configuration.
 
 ## Local-only data

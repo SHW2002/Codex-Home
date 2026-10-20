@@ -1,0 +1,671 @@
+diff --git a/scripts/codex-tasks.mjs b/scripts/codex-tasks.mjs
+index 4d12a11..8d57f06 100644
+--- a/scripts/codex-tasks.mjs
++++ b/scripts/codex-tasks.mjs
+@@ -99,8 +99,8 @@ export function readRecentJournal(threadId, marker) {
+ }
+ 
+ export async function queryTasks(action, value, command = 'codex') {
+-  if (!['list', 'read'].includes(action)) throw new Error('只支持 list 关键词 或 read 任务ID');
+-  if (action === 'read' && !/^[0-9a-f-]{36}$/i.test(value ?? '')) throw new Error('任务ID格式无效');
++  if (!['list', 'read', 'metadata'].includes(action)) throw new Error('只支持 list 关键词 或 read 任务ID');
++  if (action !== 'list' && !/^[0-9a-f-]{36}$/i.test(value ?? '')) throw new Error('任务ID格式无效');
+   const child = spawn(resolveCodexCommand(command), ['app-server'], {
+     windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+   });
+@@ -152,6 +152,7 @@ export async function queryTasks(action, value, command = 'codex') {
+       };
+     }
+     const info = await send('thread/read', { threadId: value, includeTurns: false });
++    if (action === 'metadata') return { id: info.thread.id, title: safeText(info.thread.name || info.thread.preview, 160) };
+     const journal = readRecentJournal(value);
+     if (journal?.messages.length) {
+       return {
+diff --git a/src/desktop-routing/request.ts b/src/desktop-routing/request.ts
+index 91aad78..cf3f095 100644
+--- a/src/desktop-routing/request.ts
++++ b/src/desktop-routing/request.ts
+@@ -21,8 +21,14 @@ export async function submitDesktopRequest(request: DesktopRequest, run: Desktop
+     : '没有找到这个准确名称的已有聊天，尚未提交指令，请核对聊天名称喵';
+   const threadId = matches[0].id;
+   if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId ?? '')) throw new Error('Invalid resolved thread');
+-  const sent = await run(['send', threadId, Buffer.from(request.prompt, 'utf8').toString('base64')]);
++  return submitThreadRequest(threadId, request.title, request.prompt, run);
++}
++
++export async function submitThreadRequest(threadId: string, title: string, prompt: string, run: DesktopTool): Promise<string> {
++  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId)) throw new Error('Invalid bound thread');
++  if (!prompt.trim() || Buffer.byteLength(prompt, 'utf8') > 28000) return '消息为空或超过长度限制，尚未投递喵';
++  const sent = await run(['send', threadId, Buffer.from(prompt, 'utf8').toString('base64')]);
+   if (sent.status !== 'accepted') return '这条指令的投递状态尚不确定，请先查看原聊天，不要重复发送喵';
+   await run(['wait', threadId]);
+-  return '已提交到“' + request.title + '”的原聊天，完成后会自动把回复发回这里喵';
++  return '已提交到“' + title + '”的原聊天，完成后会自动把回复发回这里喵';
+ }
+diff --git a/src/desktop-transfer/controller.ts b/src/desktop-transfer/controller.ts
+new file mode 100644
+index 0000000..9909c1c
+--- /dev/null
++++ b/src/desktop-transfer/controller.ts
+@@ -0,0 +1,81 @@
++import { BindingStore, isThreadId, type Binding } from './store.js';
++import { parseDesktopRequest } from '../desktop-routing/request.js';
++import type { DeliveryStatus } from './status.js';
++
++interface Options {
++  botKey: string;
++  owners: readonly string[];
++  enabled: () => boolean;
++  connected: () => boolean;
++  lookup: (threadId: string) => Promise<{ id: string; title: string }>;
++  announce: (actor: string, text: string) => Promise<unknown>;
++  delivery?: (binding: Binding, actor: string) => Promise<DeliveryStatus>;
++  store?: BindingStore;
++}
++export class TransferError extends Error {
++  constructor(readonly status: number, readonly code: string) { super(code); }
++}
++export type TransferResolution = { reply: string } | { binding: Binding } | undefined;
++
++export class DesktopTransfer {
++  private readonly store: BindingStore;
++  private busy = false;
++  constructor(private readonly options: Options) {
++    this.store = options.store ?? new BindingStore(options.botKey);
++  }
++
++  private owner(): string {
++    if (!this.options.enabled()) throw new TransferError(409, 'desktop_transfer_disabled');
++    if (this.options.owners.length !== 1) throw new TransferError(409, 'single_authorized_owner_required');
++    return this.options.owners[0]!;
++  }
++
++  async current() {
++    const owner = this.owner();
++    const binding = await this.store.get(owner);
++    return binding ? { status: 'bound', binding,
++      ...(this.options.delivery ? { delivery: await this.options.delivery(binding, owner) } : {}) } : { status: 'unbound' };
++  }
++
++  async activate(threadId: unknown) {
++    const owner = this.owner();
++    if (!isThreadId(threadId)) throw new TransferError(400, 'invalid_thread_id');
++    if (!this.options.connected()) throw new TransferError(503, 'wecom_disconnected');
++    if (this.busy) throw new TransferError(409, 'transfer_busy');
++    this.busy = true;
++    try {
++      const info = await this.options.lookup(threadId);
++      if (info.id !== threadId || !info.title?.trim()) throw new TransferError(404, 'thread_not_found');
++      const binding = { threadId, title: info.title.trim(), boundAt: new Date().toISOString() };
++      await this.store.set(owner, binding);
++      let notification = 'sent';
++      try {
++        await this.options.announce(owner,
++          `已接续到“${binding.title}”喵\n直接发送文字或语音即可继续这个原聊天，回复完成后会回到这里喵\n电脑端当前一轮结束后才会处理新消息喵\n查看：/desktop status；解除：/desktop off 喵`);
++      } catch { notification = 'unknown'; }
++      return { status: 'bound', binding, notification, delivery: 'awaiting_wecom_message' };
++    } finally { this.busy = false; }
++  }
++
++  async resolve(actor: string, text: string, hasAttachments: boolean): Promise<TransferResolution> {
++    if (!this.options.owners.includes(actor)) return undefined;
++    const command = text.trim().toLowerCase();
++    if (/^\/desktop(?:\s|$)/.test(command)) {
++      if (command === '/desktop off') {
++        if (this.busy) return { reply: '正在切换聊天，请稍后再解除喵' };
++        await this.store.clear(actor);
++        return { reply: '已解除桌面聊天接续，后续消息恢复企微独立对话喵' };
++      }
++      const binding = await this.store.get(actor);
++      return { reply: (binding ? `当前接续“${binding.title}”喵\n` : '当前没有接续桌面聊天喵\n') +
++        '在目标 Codex 聊天调用 $wecom-transfer 可切换；/desktop off 可解除喵' };
++    }
++    const binding = await this.store.get(actor);
++    if (!binding) return undefined;
++    if (!this.options.enabled()) return { reply: '桌面聊天接续已停用，尚未投递这条消息喵' };
++    if (hasAttachments) return { reply: '当前接续支持文字和语音，附件尚未投递，请在电脑端添加，或先 /desktop off 喵' };
++    // Explicitly named requests retain the existing one-message routing behavior.
++    if (parseDesktopRequest(text)) return undefined;
++    return { binding };
++  }
++}
+diff --git a/src/desktop-transfer/http.ts b/src/desktop-transfer/http.ts
+new file mode 100644
+index 0000000..6895f4a
+--- /dev/null
++++ b/src/desktop-transfer/http.ts
+@@ -0,0 +1,47 @@
++import type { IncomingMessage, ServerResponse } from 'node:http';
++import { DesktopTransfer, TransferError } from './controller.js';
++
++interface Service { readonly desktopTransfer: DesktopTransfer }
++function reply(response: ServerResponse, status: number, body: unknown): void {
++  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
++  response.end(JSON.stringify(body));
++}
++
++export async function handleTransferRequest(request: IncomingMessage, response: ServerResponse,
++  services: readonly Service[]): Promise<void> {
++  // Loopback alone is insufficient: reject browser requests and DNS rebinding.
++  if (request.socket.remoteAddress !== '127.0.0.1' ||
++      request.headers.host !== `127.0.0.1:${request.socket.localPort}` ||
++      request.headers.origin !== undefined || request.headers['sec-fetch-site'] !== undefined ||
++      request.headers['x-codex-transfer'] !== '1') {
++    reply(response, 403, { error: 'local_client_required' }); return;
++  }
++  if (services.length !== 1) {
++    reply(response, 409, { error: 'single_bot_required' }); return;
++  }
++  const transfer = services[0]!.desktopTransfer;
++  try {
++    if (request.method === 'GET') { reply(response, 200, await transfer.current()); return; }
++    if (request.method !== 'POST') { reply(response, 405, { error: 'method_not_allowed' }); return; }
++    if (!/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] ?? '')) {
++      reply(response, 415, { error: 'json_required' }); return;
++    }
++    const chunks: Buffer[] = [];
++    let size = 0;
++    for await (const chunk of request) {
++      size += chunk.length;
++      if (size > 4096) { reply(response, 413, { error: 'body_too_large' }); return; }
++      chunks.push(Buffer.from(chunk));
++    }
++    let body: Record<string, unknown>;
++    try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
++    catch { throw new TransferError(400, 'invalid_json'); }
++    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || !('threadId' in body)) {
++      throw new TransferError(400, 'thread_id_only');
++    }
++    reply(response, 200, await transfer.activate(body.threadId));
++  } catch (error) {
++    if (error instanceof TransferError) reply(response, error.status, { error: error.code });
++    else reply(response, 503, { error: 'transfer_unavailable', action: 'check_service_diagnostics' });
++  }
++}
+diff --git a/src/desktop-transfer/relay.ts b/src/desktop-transfer/relay.ts
+new file mode 100644
+index 0000000..f284cd0
+--- /dev/null
++++ b/src/desktop-transfer/relay.ts
+@@ -0,0 +1,42 @@
++import { generateReqId, type BaseMessage, type WSClient, type WsFrame } from '@wecom/aibot-node-sdk';
++import type { DesktopNotifications } from '../desktop-notifications.js';
++import { submitThreadRequest, type DesktopTool } from '../desktop-routing/request.js';
++import { runDesktopTool } from '../desktop-routing/tool.js';
++import { WeComStreamResponder } from '../wecom-stream.js';
++import type { Binding } from './store.js';
++
++interface Options {
++  botKey: string;
++  allowed: boolean;
++  notifications: DesktopNotifications;
++  flushMs: number;
++  timeoutMs: number;
++  run?: DesktopTool;
++}
++export async function relayDesktopMessage<T extends BaseMessage>(client: WSClient, frame: WsFrame<T>,
++  binding: Binding, prompt: string, options: Options): Promise<void> {
++  const body = frame.body;
++  if (!body) return;
++  const target = body.chattype === 'group' ? body.chatid : body.from.userid;
++  const responder = new WeComStreamResponder(client, frame, generateReqId('stream'), {
++    flushMs: options.flushMs, timeoutMs: options.timeoutMs, ...(target ? { proactiveTarget: target } : {}),
++  });
++  const requestId = options.botKey + ':' + body.msgid;
++  try {
++    if (!options.allowed || !target || body.chattype === 'group') {
++      await responder.open('当前会话未获桌面聊天接续授权，尚未投递喵');
++      await responder.update({ kind: 'replace', text: '当前会话未获桌面聊天接续授权，尚未投递喵' });
++    } else {
++      await options.notifications.register(requestId, {
++        botKey: options.botKey, target, actor: body.from.userid, group: false,
++      });
++      await responder.open(`正在投递到“${binding.title}”喵`);
++      const run = options.run ?? (args => runDesktopTool(args, requestId));
++      await responder.update({ kind: 'replace', text:
++        await submitThreadRequest(binding.threadId, binding.title, prompt, run) });
++    }
++    await responder.complete();
++  } catch {
++    await responder.fail('投递未能确认，请先查看原聊天，避免重复发送喵');
++  } finally { options.notifications.release(requestId); }
++}
+diff --git a/src/desktop-transfer/status.ts b/src/desktop-transfer/status.ts
+new file mode 100644
+index 0000000..99ca28c
+--- /dev/null
++++ b/src/desktop-transfer/status.ts
+@@ -0,0 +1,33 @@
++import { readFile, readdir } from 'node:fs/promises';
++import { join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import type { Binding } from './store.js';
++
++export interface DeliveryStatus { status: string; submittedAt?: string; updatedAt?: string }
++async function json(path: string): Promise<any> {
++  try { return JSON.parse(await readFile(path, 'utf8')); }
++  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
++}
++export async function readLatestDelivery(binding: Binding, botKey: string, actor: string,
++  root = fileURLToPath(new URL('../../../.runtime/', import.meta.url))): Promise<DeliveryStatus> {
++  const files = await readdir(join(root, 'desktop-actions')).catch((error: NodeJS.ErrnoException) => {
++    if (error.code === 'ENOENT') return [] as string[];
++    throw error;
++  });
++  let latest: { file: string; ledger: any } | undefined;
++  for (const file of files) {
++    if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
++    const ledger = await json(join(root, 'desktop-actions', file));
++    if (!ledger || ledger.threadId !== binding.threadId || typeof ledger.at !== 'string' ||
++        ledger.at < binding.boundAt || !/^[a-f0-9]{64}$/.test(ledger.notificationKey ?? '')) continue;
++    const route = await json(join(root, 'desktop-notifications', ledger.notificationKey + '.json'));
++    if (route?.botKey !== botKey || route.actor !== actor || route.group || route.target !== actor) continue;
++    if (!latest || ledger.at > latest.ledger.at) latest = { file, ledger };
++  }
++  if (!latest) return { status: 'no_message' };
++  const receipt = await json(join(root, 'desktop-notifications', latest.file + '.receipt'));
++  const known = ['accepted', 'sending', 'unknown', 'ready', 'delivered'];
++  const status = receipt?.status ?? latest.ledger.status;
++  return { status: known.includes(status) ? status : 'unknown', submittedAt: latest.ledger.at,
++    ...(typeof receipt?.updatedAt === 'string' ? { updatedAt: receipt.updatedAt } : {}) };
++}
+diff --git a/src/desktop-transfer/store.ts b/src/desktop-transfer/store.ts
+new file mode 100644
+index 0000000..d4df099
+--- /dev/null
++++ b/src/desktop-transfer/store.ts
+@@ -0,0 +1,42 @@
++import { createHash, randomUUID } from 'node:crypto';
++import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
++import { join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++export interface Binding { threadId: string; title: string; boundAt: string }
++export const isThreadId = (value: unknown): value is string => typeof value === 'string' &&
++  /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
++
++export class BindingStore {
++  constructor(private readonly botKey: string,
++    private readonly root = fileURLToPath(new URL('../../../.runtime/desktop-transfer/', import.meta.url))) {}
++
++  private path(actor: string): string {
++    return join(this.root, createHash('sha256').update(JSON.stringify([this.botKey, actor])).digest('hex') + '.json');
++  }
++
++  async get(actor: string): Promise<Binding | undefined> {
++    let value: Binding;
++    try { value = JSON.parse(await readFile(this.path(actor), 'utf8')); }
++    catch (error) {
++      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
++      throw new Error('binding_store_unavailable');
++    }
++    if (!isThreadId(value?.threadId) || typeof value.title !== 'string' || typeof value.boundAt !== 'string') {
++      throw new Error('binding_store_invalid');
++    }
++    return value;
++  }
++
++  async set(actor: string, binding: Binding): Promise<void> {
++    await mkdir(this.root, { recursive: true });
++    const path = this.path(actor);
++    const temp = path + '.' + randomUUID() + '.tmp';
++    try {
++      await writeFile(temp, JSON.stringify(binding), { mode: 0o600 });
++      await rename(temp, path);
++    } finally { await rm(temp, { force: true }); }
++  }
++
++  async clear(actor: string): Promise<void> { await rm(this.path(actor), { force: true }); }
++}
+diff --git a/src/health.ts b/src/health.ts
+index f0fc4ee..dd24cae 100644
+--- a/src/health.ts
++++ b/src/health.ts
+@@ -1,5 +1,7 @@
+ import { createServer, type Server } from 'node:http';
+ 
++import { handleTransferRequest } from './desktop-transfer/http.js';
++
+ import type { WeComAgentService } from './wecom-service.js';
+ 
+ export function buildHealthSnapshot(services: readonly WeComAgentService[]) {
+@@ -19,6 +21,10 @@ export function buildHealthSnapshot(services: readonly WeComAgentService[]) {
+ 
+ export function startHealthServer(port: number, services: readonly WeComAgentService[]): Server {
+   const server = createServer((request, response) => {
++    if (request.url === '/desktop/transfer') {
++      void handleTransferRequest(request, response, services);
++      return;
++    }
+     if (request.url !== '/health') {
+       response.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+       response.end(JSON.stringify({ error: 'not_found' }));
+diff --git a/src/wecom-service.ts b/src/wecom-service.ts
+index ff1b8dd..9a51515 100644
+--- a/src/wecom-service.ts
++++ b/src/wecom-service.ts
+@@ -38,6 +38,9 @@ import { DesktopOutbox } from './desktop-outbox.js';
+ import { parseDesktopRequest, submitDesktopRequest } from './desktop-routing/request.js';
+ import { runDesktopTool } from './desktop-routing/tool.js';
+ import { canAcceptMessage } from './security/message-access.js';
++import { DesktopTransfer } from './desktop-transfer/controller.js';
++import { relayDesktopMessage } from './desktop-transfer/relay.js';
++import { readLatestDelivery } from './desktop-transfer/status.js';
+ 
+ function quoteText(quote?: QuoteContent): string | undefined {
+   if (!quote) return undefined;
+@@ -74,6 +77,7 @@ export function canOperateDesktopTasks(config: AppConfig['pcControl'], body: Bas
+ 
+ export class WeComAgentService {
+   readonly client: WSClient;
++  readonly desktopTransfer: DesktopTransfer;
+   private readonly registry: TaskRegistry;
+   private readonly controllers = new Set<AbortController>();
+   private readonly conversionSessions = new Set<string>();
+@@ -125,6 +129,14 @@ export class WeComAgentService {
+       },
+       warn: message => logger.warn(message),
+     });
++    this.desktopTransfer = new DesktopTransfer({
++      botKey: bot.key, owners: config.pcControl.allowedUserIds,
++      enabled: () => process.env.CODEX_DESKTOP_TASKS_ENABLED === 'true',
++      connected: () => this.client.isConnected,
++      lookup: threadId => runDesktopTool(['metadata', threadId], 'local-transfer-metadata'),
++      delivery: (binding, actor) => readLatestDelivery(binding, bot.key, actor),
++      announce: (actor, content) => this.client.sendMessage(actor, { msgtype: 'markdown', markdown: { content } }),
++    });
+     this.bindEvents();
+   }
+ 
+@@ -267,6 +279,8 @@ export class WeComAgentService {
+     this.controllers.add(controller);
+ 
+     try {
++      const transfer = await this.desktopTransfer.resolve(body.from.userid, '[文件]', true);
++      if (transfer && 'reply' in transfer) { await this.replyDirect(frame, transfer.reply); return; }
+       const attachment = await this.downloadAndStore(sessionKey, body.file);
+       logger.info('企微文档附件已暂存', {
+         extension: attachment.extension,
+@@ -325,6 +339,16 @@ export class WeComAgentService {
+     let imageBatch: StoredImageBatch | undefined;
+ 
+     try {
++      const transfer = await this.desktopTransfer.resolve(actorKey, text, imageContents.length > 0);
++      if (transfer) {
++        if ('reply' in transfer) await this.replyDirect(frame, transfer.reply);
++        else await relayDesktopMessage(this.client, frame, transfer.binding, text, {
++          botKey: this.bot.key, notifications: this.notifications,
++          allowed: canOperateDesktopTasks(this.config.pcControl, body) && process.env.CODEX_DESKTOP_TASKS_ENABLED === 'true',
++          flushMs: this.config.processing.streamFlushMs, timeoutMs: this.config.processing.streamTimeoutMs,
++        });
++        return;
++      }
+       if (imageContents.length) {
+         try {
+           imageBatch = await this.downloadAndStoreImages(sessionKey, imageContents);
+diff --git a/test/desktop-transfer-http.test.mjs b/test/desktop-transfer-http.test.mjs
+new file mode 100644
+index 0000000..fba1b1b
+--- /dev/null
++++ b/test/desktop-transfer-http.test.mjs
+@@ -0,0 +1,64 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { createServer, request as httpRequest } from 'node:http';
++import { handleTransferRequest } from '../dist/src/desktop-transfer/http.js';
++import { TransferError } from '../dist/src/desktop-transfer/controller.js';
++
++const id = '11111111-1111-1111-1111-111111111111';
++async function fixture(t, overrides = {}) {
++  const calls = [];
++  const desktopTransfer = {
++    current: async () => ({ status: 'unbound' }),
++    activate: async threadId => { calls.push(threadId); return { status: 'bound' }; }, ...overrides,
++  };
++  const server = createServer((req, res) => void handleTransferRequest(req, res, [{ desktopTransfer }]));
++  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
++  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
++  const url = `http://127.0.0.1:${server.address().port}/desktop/transfer`;
++  const headers = { 'X-Codex-Transfer': '1', 'Content-Type': 'application/json' };
++  return { url, headers, calls };
++}
++
++test('local JSON client can bind and query without filesystem credentials', async t => {
++  const f = await fixture(t);
++  const response = await fetch(f.url, { method: 'POST', headers: f.headers, body: JSON.stringify({ threadId: id }) });
++  assert.equal(response.status, 200); assert.equal((await response.json()).status, 'bound');
++  assert.deepEqual(f.calls, [id]);
++  assert.equal((await (await fetch(f.url, { headers: f.headers })).json()).status, 'unbound');
++});
++
++test('browser, missing client marker, rebinding host and preflight requests cannot mutate', async t => {
++  const f = await fixture(t);
++  for (const headers of [{}, { ...f.headers, Origin: 'https://example.com' },
++    { ...f.headers, 'Sec-Fetch-Site': 'same-origin' }]) {
++    const res = await fetch(f.url, { method: 'POST', headers, body: JSON.stringify({ threadId: id }) });
++    assert.equal(res.status, 403);
++  }
++  const status = await new Promise((resolve, reject) => {
++    const req = httpRequest(f.url, { method: 'POST', headers: { ...f.headers, Host: 'evil.example' } }, res => {
++      res.resume(); resolve(res.statusCode);
++    });
++    req.on('error', reject); req.end(JSON.stringify({ threadId: id }));
++  });
++  assert.equal(status, 403);
++  assert.equal((await fetch(f.url, { method: 'OPTIONS', headers: f.headers })).status, 405);
++  assert.deepEqual(f.calls, []);
++});
++
++test('API accepts only a bounded threadId payload, no command or arbitrary prompt', async t => {
++  const f = await fixture(t);
++  for (const body of ['{', 'null', '1', '[]', '{}', JSON.stringify({ threadId: id, prompt: 'execute' })]) {
++    assert.equal((await fetch(f.url, { method: 'POST', headers: f.headers, body })).status, 400);
++  }
++  assert.equal((await fetch(f.url, { method: 'POST', headers: f.headers, body: 'x'.repeat(4097) })).status, 413);
++  assert.equal((await fetch(f.url, { method: 'POST', headers: { 'X-Codex-Transfer': '1' }, body: '{}' })).status, 415);
++  assert.deepEqual(f.calls, []);
++});
++
++test('diagnostics expose stable error codes without underlying process details', async t => {
++  const f = await fixture(t, { activate: async () => { throw new Error('private process detail'); } });
++  const res = await fetch(f.url, { method: 'POST', headers: f.headers, body: JSON.stringify({ threadId: id }) });
++  assert.equal(res.status, 503); assert.equal((await res.json()).error, 'transfer_unavailable');
++  const g = await fixture(t, { activate: async () => { throw new TransferError(503, 'wecom_disconnected'); } });
++  assert.equal((await (await fetch(g.url, { method: 'POST', headers: g.headers, body: '{}' })).json()).error, 'thread_id_only');
++});
+diff --git a/test/desktop-transfer-relay.test.mjs b/test/desktop-transfer-relay.test.mjs
+new file mode 100644
+index 0000000..6f9f5d5
+--- /dev/null
++++ b/test/desktop-transfer-relay.test.mjs
+@@ -0,0 +1,54 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { relayDesktopMessage } from '../dist/src/desktop-transfer/relay.js';
++
++const id = '11111111-1111-1111-1111-111111111111';
++const binding = { threadId: id, title: '原聊天', boundAt: new Date().toISOString() };
++const frame = { headers: { req_id: 'test-frame' }, body: {
++  msgid: 'unit-test-only', chattype: 'single', from: { userid: 'owner' },
++} };
++function fixture() {
++  const registrations = [], released = [], calls = [], replies = [];
++  const client = {
++    replyStream: async (_frame, _key, text, final) => replies.push({ text, final }),
++    replyStreamNonBlocking: async () => {}, sendMessage: async () => {},
++  };
++  const options = { botKey: 'bot', allowed: true, flushMs: 10000, timeoutMs: 10000,
++    notifications: {
++      register: async (...args) => registrations.push(args),
++      release: requestId => released.push(requestId),
++    },
++    run: async args => { calls.push(args); return { status: args[0] === 'send' ? 'accepted' : 'background_tracking' }; },
++  };
++  return { client, options, calls, replies, registrations, released };
++}
++
++test('relay preserves real incoming msgid and original sender for later final-answer return', async () => {
++  const f = fixture();
++  await relayDesktopMessage(f.client, frame, binding, '继续', f.options);
++  assert.deepEqual(f.registrations, [['bot:unit-test-only', {
++    botKey: 'bot', target: 'owner', actor: 'owner', group: false,
++  }]]);
++  assert.deepEqual(f.calls.map(c => c[0]), ['send', 'wait']);
++  assert.equal(f.calls[0][1], id);
++  assert.deepEqual(f.released, ['bot:unit-test-only']);
++  assert.match(f.replies.at(-1).text, /已提交/); assert.equal(f.replies.at(-1).final, true);
++});
++
++test('relay denies unauthorized and group messages without registering or sending', async () => {
++  for (const group of [false, true]) {
++    const f = fixture();
++    await relayDesktopMessage(f.client, group ? { ...frame, body: { ...frame.body, chattype: 'group', chatid: 'group' } } : frame,
++      binding, '继续', { ...f.options, allowed: group });
++    assert.deepEqual(f.calls, []); assert.deepEqual(f.registrations, []);
++    assert.match(f.replies.at(-1).text, /未获/);
++  }
++});
++
++test('uncertain send is not retried and watcher registration is released', async () => {
++  const f = fixture();
++  f.options.run = async args => { f.calls.push(args); throw new Error('lost connection'); };
++  await relayDesktopMessage(f.client, frame, binding, '确认', f.options);
++  assert.equal(f.calls.length, 1); assert.deepEqual(f.released, ['bot:unit-test-only']);
++  assert.match(f.replies.at(-1).text, /避免重复/);
++});
+diff --git a/test/desktop-transfer-status.test.mjs b/test/desktop-transfer-status.test.mjs
+new file mode 100644
+index 0000000..ca5b50d
+--- /dev/null
++++ b/test/desktop-transfer-status.test.mjs
+@@ -0,0 +1,34 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
++import { join } from 'node:path';
++import { tmpdir } from 'node:os';
++import { readLatestDelivery } from '../dist/src/desktop-transfer/status.js';
++
++test('status exposes only post-binding matching-actor delivery metadata, not messages or credentials', async t => {
++  const root = await mkdtemp(join(tmpdir(), 'wecom-delivery-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  const binding = { threadId: 'thread', title: 'chat', boundAt: '2026-10-20T01:00:00.000Z' };
++  assert.deepEqual(await readLatestDelivery(binding, 'bot', 'owner', root), { status: 'no_message' });
++  await mkdir(join(root, 'desktop-actions')); await mkdir(join(root, 'desktop-notifications'));
++  async function seed(key, at, route, status) {
++    const file = key.repeat(64) + '.json';
++    await writeFile(join(root, 'desktop-actions', file), JSON.stringify({ threadId: 'thread', at,
++      status: 'accepted', notificationKey: key.repeat(64), prompt: 'private content' }));
++    await writeFile(join(root, 'desktop-notifications', key.repeat(64) + '.json'), JSON.stringify(route));
++    if (status) await writeFile(join(root, 'desktop-notifications', file + '.receipt'),
++      JSON.stringify({ status, updatedAt: at, parts: ['private reply'] }));
++  }
++  const route = { botKey: 'bot', target: 'owner', actor: 'owner', group: false };
++  await seed('a', '2026-10-20T00:00:00.000Z', route, 'delivered');
++  await seed('b', '2026-10-20T02:00:00.000Z', { ...route, actor: 'other' }, 'delivered');
++  assert.deepEqual(await readLatestDelivery(binding, 'bot', 'owner', root), { status: 'no_message' });
++  await seed('c', '2026-10-20T03:00:00.000Z', route);
++  assert.deepEqual(await readLatestDelivery(binding, 'bot', 'owner', root), {
++    status: 'accepted', submittedAt: '2026-10-20T03:00:00.000Z',
++  });
++  await seed('c', '2026-10-20T03:00:00.000Z', route, 'delivered');
++  assert.deepEqual(await readLatestDelivery(binding, 'bot', 'owner', root), {
++    status: 'delivered', submittedAt: '2026-10-20T03:00:00.000Z', updatedAt: '2026-10-20T03:00:00.000Z',
++  });
++});
+diff --git a/test/desktop-transfer.test.mjs b/test/desktop-transfer.test.mjs
+new file mode 100644
+index 0000000..876ee7e
+--- /dev/null
++++ b/test/desktop-transfer.test.mjs
+@@ -0,0 +1,90 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtemp, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { DesktopTransfer } from '../dist/src/desktop-transfer/controller.js';
++import { BindingStore } from '../dist/src/desktop-transfer/store.js';
++import { submitThreadRequest } from '../dist/src/desktop-routing/request.js';
++
++const id = '11111111-1111-1111-1111-111111111111';
++const other = '22222222-2222-2222-2222-222222222222';
++async function fixture(t, overrides = {}) {
++  const root = await mkdtemp(join(tmpdir(), 'wecom-transfer-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  const notices = [];
++  const store = new BindingStore('bot', root);
++  const options = { botKey: 'bot', store, owners: ['owner'], enabled: () => true,
++    connected: () => true, lookup: async threadId => ({ id: threadId, title: '同名聊天' }),
++    announce: async (actor, text) => notices.push({ actor, text }), ...overrides };
++  return { options, notices, root, controller: new DesktopTransfer(options) };
++}
++
++test('one activation persists the UUID target and plain follow-ups survive service restart', async t => {
++  const f = await fixture(t);
++  const result = await f.controller.activate(id);
++  assert.equal(result.status, 'bound'); assert.equal(result.notification, 'sent');
++  assert.equal(result.delivery, 'awaiting_wecom_message');
++  assert.equal(f.notices.length, 1); assert.equal(f.notices[0].actor, 'owner');
++  const restarted = new DesktopTransfer({ ...f.options, store: new BindingStore('bot', f.root) });
++  assert.equal((await restarted.resolve('owner', '继续处理', false)).binding.threadId, id);
++  await restarted.activate(other);
++  assert.equal((await restarted.resolve('owner', '继续', false)).binding.threadId, other);
++  assert.match((await restarted.resolve('owner', '/desktop off', false)).reply, /已解除/);
++  assert.equal(await restarted.resolve('owner', '新的普通对话', false), undefined);
++});
++
++test('unauthorized actors and attachments cannot reach the bound desktop', async t => {
++  const f = await fixture(t);
++  await f.controller.activate(id);
++  assert.equal(await f.controller.resolve('stranger', '继续', false), undefined);
++  assert.match((await f.controller.resolve('owner', '[图片]', true)).reply, /附件尚未投递/);
++  assert.equal(await f.controller.resolve('owner', '在“另一个”这个已有 Codex 聊天中继续：确认', false), undefined);
++  const otherBot = new DesktopTransfer({ ...f.options, store: new BindingStore('other-bot', f.root) });
++  assert.equal(await otherBot.resolve('owner', '继续', false), undefined);
++});
++
++test('disconnected, ambiguous-owner and invalid target failures leave prior binding unchanged', async t => {
++  const f = await fixture(t);
++  await f.controller.activate(id);
++  await assert.rejects(f.controller.activate('../secret'), /invalid_thread_id/);
++  await assert.rejects(new DesktopTransfer({ ...f.options, connected: () => false }).activate(other), /wecom_disconnected/);
++  await assert.rejects(new DesktopTransfer({ ...f.options, owners: ['a', 'b'] }).activate(other), /single_authorized_owner/);
++  await assert.rejects(new DesktopTransfer({ ...f.options, enabled: () => false }).activate(other), /disabled/);
++  await assert.rejects(new DesktopTransfer({ ...f.options, lookup: async () => ({ id: other, title: 'wrong' }) }).activate(id), /thread_not_found/);
++  assert.equal((await f.controller.current()).binding.threadId, id);
++});
++
++test('uncertain activation announcement keeps binding and is never automatically resent', async t => {
++  let attempts = 0;
++  const f = await fixture(t, { announce: async () => { attempts++; throw new Error('lost ack'); } });
++  assert.equal((await f.controller.activate(id)).notification, 'unknown');
++  assert.equal((await f.controller.current()).status, 'bound');
++  await f.controller.resolve('owner', '继续', false);
++  assert.equal(attempts, 1);
++});
++
++test('concurrent activation is rejected rather than racing bindings', async t => {
++  let release;
++  const gate = new Promise(resolve => { release = resolve; });
++  const f = await fixture(t, { lookup: async threadId => { await gate; return { id: threadId, title: 'chat' }; } });
++  const active = f.controller.activate(id);
++  await assert.rejects(f.controller.activate(other), /transfer_busy/);
++  assert.match((await f.controller.resolve('owner', '/desktop off', false)).reply, /正在切换/);
++  release(); await active;
++  assert.equal((await f.controller.current()).binding.threadId, id);
++});
++
++test('bound submissions use the UUID once and never retry an unknown result', async () => {
++  const calls = [];
++  const reply = await submitThreadRequest(id, '同名聊天', '你好😀', async args => {
++    calls.push(args); return { status: args[0] === 'send' ? 'accepted' : 'background_tracking' };
++  });
++  assert.match(reply, /已提交/);
++  assert.deepEqual(calls.map(c => c[0]), ['send', 'wait']);
++  assert.equal(calls[0][1], id);
++  assert.equal(Buffer.from(calls[0][2], 'base64').toString('utf8'), '你好😀');
++  let count = 0;
++  assert.match(await submitThreadRequest(id, 'chat', '确认', async () => { count++; return { status: 'unknown' }; }), /不要重复/);
++  assert.equal(count, 1);
++});

@@ -1,36 +1,43 @@
 ---
 name: wecom-transfer
-description: 将本机 Codex 的当前已有聊天接续到已部署的企业微信机器人；适用于“把当前会话转到企微”“从企微继续这个聊天”等请求，核对聊天并生成可复制的入口指令。
+description: 通过已部署的本机桥接服务，将当前已有 Codex 聊天直接绑定到企业微信；适用于“把当前会话转到企微”“从企微继续这个聊天”，后续消息无需聊天名称前缀。
 ---
 
 # 企业微信接续当前聊天
 
-复用本机 `D:\Services\WeCom-Codex-Bridge`，不需要重新部署、创建机器人或输入 Secret。
+复用本机 `http://127.0.0.1:8787` 的桥接服务。调用一次即绑定原聊天，并向已授权的企微单聊发送切换通知；之后直接在企微发文字或语音即可继续。
 
-## 快捷流程
+## 执行
 
-1. 使用当前环境的 `CODEX_THREAD_ID` 识别本聊天；如果不可用，用桌面 `list_threads` 核对当前聊天的 ID 和准确标题，避免只按工作目录猜测。在桥接子会话中不能把桥接自己的 ID 当成用户所指的桌面聊天。
-2. 执行本技能目录中的 `scripts/prepare-transfer.mjs`，传入真实聊天 ID。例如：
+1. 从当前环境的 `CODEX_THREAD_ID` 取得真实聊天 ID；缺失时通过桌面 `list_threads` 核对，不按目录猜测，也不把桥接子会话的 ID 当作目标。
+2. **直接在普通 PowerShell 工具中请求本机接口**，不先启动技能目录中的 Node 脚本，不读取密钥，不申请提权：
 
    ```powershell
-   node '<本技能绝对路径>\scripts\prepare-transfer.mjs' --thread '<当前聊天UUID>' --copy
+   $transferThread = $env:CODEX_THREAD_ID
+   # 若上一阶段通过桌面工具核对了 ID，则在此使用核对后的 UUID。
+   $transferBody = @{ threadId = $transferThread } | ConvertTo-Json -Compress
+   Invoke-RestMethod -Uri 'http://127.0.0.1:8787/desktop/transfer' `
+     -Method Post -Headers @{ 'X-Codex-Transfer' = '1' } `
+     -ContentType 'application/json; charset=utf-8' `
+     -Body ([Text.Encoding]::UTF8.GetBytes($transferBody)) -TimeoutSec 45
    ```
 
-   `--copy` 将入口文字复制到本机剪贴板。省略该选项只返回入口文字。用户给了第一条企微指令时，使用 `--message` 参数原样传入；默认只汇报本聊天进度，不修改文件。
+3. 核对返回 `status: bound`、`binding.threadId` 与目标一致。告知用户已切换，直接在企微单聊发消息即可；`notification: sent` 表示切换通知已发送，`delivery: awaiting_wecom_message` 表示还没有新的企微指令，不能声称已完成双向验收。
+4. `notification: unknown` 时绑定仍已保存，只说明通知回执不确定；不要自动重复绑定或发送测试。用户需要验收时，用其授权的无文件改动消息，并核对对应原聊天回复及 `delivered` 回传记录。
 
-3. 脚本实际检查服务健康、聊天 ID、准确名称和名称是否唯一。成功后简洁告知用户：“已复制当前聊天的企微入口，到机器人单聊粘贴发送即可”。保留一份可复制的 `entryMessage`，以便剪贴板不可用时使用。
-4. 用户在企微发送后，消息会通过原服务的发送人白名单和 `list/send/wait` 脚本进入原聊天，回复完成后自动回到原企微单聊。忙碌聊天可能等待当前轮次结束。
+当前聊天忙碌时，新企微消息会等待本轮结束；不要在当前轮一直等待自己回复。
 
-此快捷入口生成接续指令；当前桥接按每条消息中的准确聊天名称路由。持续操作同一聊天时，每条企微指令保留 `在“聊天准确名称”这个已有 Codex 聊天中继续：` 前缀。
+## 切换与解除
 
-完整的无密钥维护流程见 [references/operations.md](references/operations.md)，可随本技能同步。
+- 在另一个 Codex 聊天再次调用本技能即可切换到那个原聊天，按 UUID 路由，不要求唯一名称。
+- 企微发送 `/desktop status` 查看目标，发送 `/desktop off` 解除，恢复企微独立对话；已有已投递消息不会撤回。
+- 绑定持久保存，服务重启后保留。目前接续支持文字和语音，附件会明确拒绝投递。
+- 原有带准确名称的入口仍可临时路由一条消息，不改变持久绑定。
 
-## 边界与排障
+## 排障边界
 
-- 不读取、打印或转发 Secret；普通接续不需要凭证。
-- 不向其他聊天投递测试，不伪造企微消息 ID，不直接调用裸 `codex queue`。脚本没有投递副作用，不要把入口生成成功说成已提交或已完成。
-- 不用 `exec resume` 并行恢复目标桌面聊天。只读查询和消息去重由现有桥接完成。
-- 名称有歧义或不适合当前路由格式时，说明原因并让用户选定唯一聊天名称，不自动改名。
-- 服务离线时先读取部署手册的服务管理章节；不要再启动旧 GolemBot 长连接。启动现有服务属于接续请求的必要恢复操作，先核对没有同机器人旧实例。
-- 普通工具沙箱可能阻止嵌套 Codex 读取本机用户目录；若出现无法找到 home/查询进程退出，使用获准的本机执行权限运行这个只读脚本，不扩大模型目录或关闭沙箱。
-- 含 Bot ID、Secret、恢复步骤及历史验收记录的本地私有手册：`C:\Users\S.H.W\Documents\Codex\2026-10-18\new-chat\outputs\企业微信-Codex-本地操作手册-私密.md`。只有维护或恢复配置需要时才读取凭证部分，凭证不出现在最终回复、Git、命令行参数或日志中。
+- 首先用同样的请求头 GET `/desktop/transfer` 查询绑定及脱敏 `delivery.status`，并 GET `/health` 检查服务；普通接续不需要 `.env`、Bot ID 或 Secret，也不直接读取受保护的 `.runtime`。`accepted` 表示已入队，`delivered` 才表示最终回复已回传。
+- 禁止把普通环境失败改为每次提权运行旧脚本；旧版 Node 文件入口曾在启动前因用户目录 `EPERM` 失败，内联 HTTP 调用解决了这个依赖。
+- 接口返回 404 表示服务尚未升级；连接失败、`wecom_disconnected`、`desktop_transfer_disabled` 等按 [references/operations.md](references/operations.md) 诊断现有服务，不关闭沙箱或新增模型目录授权。
+- `single_bot_required` 或 `single_authorized_owner_required` 表示配置存在歧义，不能猜测目标接收人。
+- 不伪造企微消息 ID，不调用裸 `codex queue`，不另启 `exec resume`；真实消息仍由原桥接核对发送人、去重并回传。
