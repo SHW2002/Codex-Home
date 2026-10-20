@@ -1,0 +1,4 @@
+interface:
+  display_name: "转到企业微信"
+  short_description: "复用已部署的本机机器人，核对当前已有聊天并复制企微接续入口指令"
+  default_prompt: "使用 $wecom-transfer，把当前已有 Codex 聊天接续到企业微信，并复制可直接发送的入口文字。"

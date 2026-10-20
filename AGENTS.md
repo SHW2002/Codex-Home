@@ -31,3 +31,8 @@
 - 对所有Python项目:
   - 所有源代码文件放入项目目录/src/文件夹下.
 
+
+## SSH 连接规范
+
+- fairy 的 SSH 登录用户为 shw，默认使用 ssh shw@fairy（本机 SSH 配置已设置 User shw，也可直接 ssh fairy）。
+- fairy 的应用部署目录为 /Users/shw/Documents/Applications，除非用户另有指定。

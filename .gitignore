@@ -1,32 +1,26 @@
-﻿# Shared prompt assets
-!AGENTS.md
-!README.md
-!skills/
-!skills/README.md
-!skills/**/SKILL.md
-!skills/**/references/**
+# Sync reusable prompt assets; keep local credentials and runtime state outside Git.
+/*
+!/.gitignore
+!/.gitattributes
+!/.git_contribute.bat
+!/AGENTS.md
+!/README.md
+!/README_CN.md
+!/skills/
 
-# Local configuration and credentials
-auth.json
-cap_sid
-installation_id
-config.toml
-version.json
+# Built-in skills are installed and updated by Codex.
+/skills/.system/
 
-# Runtime data
-.personality_migration
-history.jsonl
-*.sqlite
-*.sqlite-shm
-*.sqlite-wal
-*.log
-.sandbox/
-.sandbox-bin/
-.tmp/
-tmp/
-sessions/
-memories/
-rules/
-
-# Built-in and machine-managed skills
-skills/.system/
+# Do not sync secrets or generated files inside custom skills either.
+**/.env
+**/.env.*
+!**/.env.example
+**/auth.json*
+**/config.toml.bak*
+**/*私密*
+**/*.private.*
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/*.log
+**/*.sqlite*
