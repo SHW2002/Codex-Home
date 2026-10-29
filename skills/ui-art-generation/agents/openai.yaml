@@ -1,0 +1,4 @@
+interface:
+  display_name: "UI 插画生成"
+  short_description: "沿用项目画风生成透明 UI 插画、成套状态图及动画分层素材"
+  default_prompt: "使用 $ui-art-generation，参考当前项目画风生成所需的透明 UI 插画，并完成切图与小尺寸预览检查。"

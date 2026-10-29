@@ -1,0 +1,8 @@
+# Credentials stay local; keep the empty template shareable.
+.env
+.env.*
+!.env.example
+
+# Python runtime artifacts.
+__pycache__/
+*.py[cod]
