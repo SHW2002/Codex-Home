@@ -1,0 +1,4 @@
+interface:
+  display_name: "场景物品贴图生成"
+  short_description: "参考现有场景生成透明道具与建筑补件，检查画风、结构连接及遮挡"
+  default_prompt: "使用 $scene-prop-generation，参考当前项目场景和历史美术反馈，生成风格一致的场景物品透明贴图并检查实际构图。"
